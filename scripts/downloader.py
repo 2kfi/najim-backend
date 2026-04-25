@@ -35,9 +35,9 @@ def voice_to_filenames(voice: str) -> dict:
     voice: "en.en_GB.cori.high"  →  "ar.ar_JO.kareem.medium"
     returns:
         {
-            "onnx": "en_GB-cori-high.onnx",
-            "config": "en_GB-cori-high.onnx.json",
-            "model_card": "MODEL_CARD"
+            "onnx": "en/en_GB/cori/high/en_GB-cori-high.onnx",
+            "config": "en/en_GB/cori/high/en_GB-cori-high.onnx.json",
+            "model_card": "en/en_GB/cori/high/MODEL_CARD"
         }
     """
     if not voice:
@@ -48,16 +48,18 @@ def voice_to_filenames(voice: str) -> dict:
         logger.warning(f"Invalid voice format: {voice} (expected: lang.region.name.quality)")
         return {"onnx": "*.onnx", "config": "*.onnx.json", "model_card": "MODEL_CARD"}
     
-    lang_region = parts[1]      # "en_GB" or "ar_JO"
-    voice_name = parts[2]                      # "cori"
-    quality = parts[3]                         # "high"
+    lang = parts[0]                        # "en"
+    region = parts[1]                     # "en_GB"
+    voice_name = parts[2]                  # "cori"
+    quality = parts[3]                     # "high"
     
-    filename = f"{lang_region}-{voice_name}-{quality}"
+    repo_path = f"{lang}/{region}/{voice_name}/{quality}"
+    filename = f"{region}-{voice_name}-{quality}"
     
     return {
-        "onnx": f"{filename}.onnx",
-        "config": f"{filename}.onnx.json",
-        "model_card": "MODEL_CARD"
+        "onnx": f"{repo_path}/{filename}.onnx",
+        "config": f"{repo_path}/{filename}.onnx.json",
+        "model_card": f"{repo_path}/MODEL_CARD"
     }
 
 
@@ -84,20 +86,8 @@ def get_allow_patterns(model_type: str, hf_repo: str, voice: str = None) -> list
     """Generate allow patterns to download only needed files."""
     
     if model_type == "stt":
-        # STT - faster-whisper uses files like: model.bin, config.json, tokenizer.json
-        # No "medium" in filename - it's just model.bin!
-        if "tiny" in hf_repo.lower():
-            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
-        elif "small" in hf_repo.lower():
-            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
-        elif "base" in hf_repo.lower():
-            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
-        elif "medium" in hf_repo.lower():
-            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
-        elif "large" in hf_repo.lower():
-            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
-        else:
-            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
+        # Download all files for STT (selective download has issues with faster-whisper)
+        return ["*"]
     
     elif model_type == "tts" and voice:
         # TTS - download only specific voice files
