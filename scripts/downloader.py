@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Model downloader - downloads only needed model files from HuggingFace.
-Fixed to use allow_patterns to avoid downloading entire 18GB repos.
+Fixed to extract flat files and destroy the nested directory tree!
 """
 import os
 import glob
 import yaml
 import logging
+import shutil
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -30,53 +31,55 @@ def has_tts_model(path: str) -> bool:
 
 def voice_to_filenames(voice: str) -> dict:
     """
-    Convert voice config to exact file names.
-    
-    voice: "en.en_GB.cori.high"  →  "ar.ar_JO.kareem.medium"
-    returns:
-        {
-            "onnx": "en/en_GB/cori/high/en_GB-cori-high.onnx",
-            "config": "en/en_GB/cori/high/en_GB-cori-high.onnx.json",
-            "model_card": "en/en_GB/cori/high/MODEL_CARD"
-        }
+    Convert voice config to exact file names, keeping track of both
+    the nested repo path (for downloading) and the flat path (for moving/validating).
     """
     if not voice:
-        return {"onnx": "*.onnx", "config": "*.onnx.json", "model_card": "MODEL_CARD"}
+        return {
+            "onnx_repo": "*.onnx", "config_repo": "*.onnx.json", "model_card_repo": "MODEL_CARD",
+            "onnx_flat": "*.onnx", "config_flat": "*.onnx.json", "model_card_flat": "MODEL_CARD"
+        }
     
     parts = voice.split(".")
     if len(parts) < 4:
         logger.warning(f"Invalid voice format: {voice} (expected: lang.region.name.quality)")
-        return {"onnx": "*.onnx", "config": "*.onnx.json", "model_card": "MODEL_CARD"}
+        return {
+            "onnx_repo": "*.onnx", "config_repo": "*.onnx.json", "model_card_repo": "MODEL_CARD",
+            "onnx_flat": "*.onnx", "config_flat": "*.onnx.json", "model_card_flat": "MODEL_CARD"
+        }
     
-    lang = parts[0]                        # "en"
-    region = parts[1]                     # "en_GB"
-    voice_name = parts[2]                  # "cori"
-    quality = parts[3]                     # "high"
+    lang = parts[0]
+    region = parts[1]
+    voice_name = parts[2]
+    quality = parts[3]
     
     repo_path = f"{lang}/{region}/{voice_name}/{quality}"
     filename = f"{region}-{voice_name}-{quality}"
     
     return {
-        "onnx": f"{repo_path}/{filename}.onnx",
-        "config": f"{repo_path}/{filename}.onnx.json",
-        "model_card": f"{repo_path}/MODEL_CARD"
+        "onnx_repo": f"{repo_path}/{filename}.onnx",
+        "config_repo": f"{repo_path}/{filename}.onnx.json",
+        "model_card_repo": f"{repo_path}/MODEL_CARD",
+        "onnx_flat": f"{filename}.onnx",
+        "config_flat": f"{filename}.onnx.json",
+        "model_card_flat": "MODEL_CARD"
     }
 
 
 def validate_tts_model(local_path: str, voice: str) -> bool:
-    """Check all 3 required TTS files exist."""
+    """Check all 3 required TTS files exist flatly in the directory."""
     files = voice_to_filenames(voice)
     
-    for key, pattern in [("ONNX", files["onnx"]), ("config", files["config"]), ("MODEL_CARD", files["model_card"])]:
-        if key == "MODEL_CARD":
-            model_card_path = os.path.join(local_path, files["model_card"])
-            if not os.path.exists(model_card_path):
-                logger.error(f"Missing MODEL_CARD: {model_card_path}")
+    for key, expected_file in [("ONNX", files["onnx_flat"]), ("config", files["config_flat"]), ("MODEL_CARD", files["model_card_flat"])]:
+        file_path = os.path.join(local_path, expected_file)
+        
+        if '*' in expected_file:
+            if not glob.glob(file_path):
+                logger.error(f"Missing {key}: {file_path}")
                 return False
         else:
-            pattern_path = os.path.join(local_path, pattern)
-            if not glob.glob(pattern_path):
-                logger.error(f"Missing {key}: {pattern_path}")
+            if not os.path.exists(file_path):
+                logger.error(f"Missing {key}: {file_path}")
                 return False
     
     return True
@@ -84,19 +87,15 @@ def validate_tts_model(local_path: str, voice: str) -> bool:
 
 def get_allow_patterns(model_type: str, hf_repo: str, voice: str = None) -> list:
     """Generate allow patterns to download only needed files."""
-    
     if model_type == "stt":
-        # Download all files for STT (selective download has issues with faster-whisper)
         return ["*"]
     
     elif model_type == "tts" and voice:
-        # TTS - download only specific voice files
-        # voice: "en.en_GB.cori.high" → exact filenames: "en_GB-cori-high.onnx"
         files = voice_to_filenames(voice)
         return [
-            files["onnx"],
-            files["config"],
-            files["model_card"],
+            files["onnx_repo"],
+            files["config_repo"],
+            files["model_card_repo"],
         ]
     
     return ["*"]
@@ -104,20 +103,19 @@ def get_allow_patterns(model_type: str, hf_repo: str, voice: str = None) -> list
 
 def get_ignore_patterns(model_type: str) -> list:
     """Patterns to exclude."""
-    
     ignore = [
         ".git/*",
         "*.md",
         "README*",
         "*.txt",
-        "*.pth",  # PyTorch weights we don't need
+        "*.pth",
         "*.pt",
-        "*.h5",   # Keras weights
+        "*.h5",
     ]
     
     if model_type == "tts":
         ignore.extend([
-            "original/*",      # Originalformat files
+            "original/*",
             "*/original/*",
             "*_original.onnx",
         ])
@@ -126,18 +124,6 @@ def get_ignore_patterns(model_type: str) -> list:
 
 
 def download_model(local_path: str, hf_repo: str, model_type: str = "stt", voice: str = None) -> bool:
-    """
-    Download only specific model files using allow_patterns.
-    
-    Args:
-        local_path: Local directory to save model
-        hf_repo: HuggingFace repo ID (e.g., "Systran/faster-whisper-medium")
-        model_type: "stt" or "tts"
-        voice: TTS voice name (e.g., "en.en_GB.cori.high")
-    
-    Returns:
-        True if download succeeded, False otherwise
-    """
     try:
         from huggingface_hub import snapshot_download
         
@@ -147,9 +133,6 @@ def download_model(local_path: str, hf_repo: str, model_type: str = "stt", voice
         ignore_patterns = get_ignore_patterns(model_type)
         
         logger.info(f"Downloading {model_type}: {hf_repo}")
-        logger.info(f"  Allow: {allow_patterns}")
-        logger.info(f"  Ignore: {ignore_patterns}")
-        logger.info(f"  To: {local_path}")
         
         snapshot_download(
             repo_id=hf_repo,
@@ -159,10 +142,29 @@ def download_model(local_path: str, hf_repo: str, model_type: str = "stt", voice
             local_dir_use_symlinks=False,
         )
         
-        # Validate TTS download
+        # FLATTEN DIRECTORY TREE FOR TTS
         if model_type == "tts" and voice:
+            files = voice_to_filenames(voice)
+            
+            # 1. Move files out of the nested tree to the root of local_path
+            for key in ["onnx", "config", "model_card"]:
+                src = os.path.join(local_path, files[f"{key}_repo"])
+                dst = os.path.join(local_path, files[f"{key}_flat"])
+                
+                if os.path.exists(src) and src != dst:
+                    shutil.move(src, dst)
+                    logger.info(f"Flattened: {files[f'{key}_flat']}")
+            
+            # 2. Obliterate the empty nested directory tree
+            top_level_dir = files["onnx_repo"].split('/')[0]
+            dir_to_remove = os.path.join(local_path, top_level_dir)
+            
+            if os.path.exists(dir_to_remove) and os.path.isdir(dir_to_remove):
+                shutil.rmtree(dir_to_remove)
+                logger.info(f"Cleaned up empty directory tree: {top_level_dir}/")
+
             if not validate_tts_model(local_path, voice):
-                logger.error(f"Validation failed - missing files: {local_path}")
+                logger.error(f"Validation failed - missing flat files: {local_path}")
                 return False
         
         logger.info(f"✓ Download complete: {local_path}")
@@ -174,13 +176,10 @@ def download_model(local_path: str, hf_repo: str, model_type: str = "stt", voice
 
 
 def check_and_download_models(config: dict):
-    """Check existing models and download missing ones."""
-    
     # STT
     stt = config.get("stt", {})
     stt_path = stt.get("model_path", "models/whisper-medium")
     stt_repo = stt.get("hf_repo", "")
-    
     download_on_startup = config.get("models", {}).get("download_on_startup", False)
     
     if not download_on_startup:
@@ -190,8 +189,6 @@ def check_and_download_models(config: dict):
     
     if not has_stt_model(stt_path):
         logger.info(f"STT model missing: {stt_path}")
-        logger.info(f"  Repo: {stt_repo}")
-        
         if download_model(stt_path, stt_repo, model_type="stt"):
             logger.info(f"✓ STT downloaded: {stt_path}")
         else:
@@ -210,23 +207,18 @@ def check_and_download_models(config: dict):
         if not local_path or not hf_repo or not voice:
             continue
         
-        if has_tts_model(local_path):
-            logger.info(f"✓ TTS [{lang}] exists: {local_path}")
+        if validate_tts_model(local_path, voice):
+            logger.info(f"✓ TTS [{lang}] exists (flat): {local_path}")
             continue
         
-        logger.info(f"TTS [{lang}] missing: {local_path}")
-        logger.info(f"  Repo: {hf_repo}")
-        logger.info(f"  Voice: {voice}")
-        
+        logger.info(f"TTS [{lang}] missing or not flat: {local_path}")
         if download_model(local_path, hf_repo, model_type="tts", voice=voice):
-            logger.info(f"✓ TTS [{lang}] downloaded: {local_path}")
+            logger.info(f"✓ TTS [{lang}] downloaded and flattened: {local_path}")
         else:
             logger.error(f"✗ TTS [{lang}] download failed")
 
 
 def warn_missing_models(config: dict):
-    """Warn about missing models without downloading."""
-    
     stt = config.get("stt", {})
     stt_path = stt.get("model_path", "models/whisper-medium")
     
@@ -245,33 +237,21 @@ def warn_missing_models(config: dict):
         has_all = validate_tts_model(local_path, voice) if voice else has_onnx
         
         if not has_all:
-            logger.warning(f"MISSING TTS [{lang}]: {local_path}")
-            if not has_onnx:
-                logger.warning(f"  -> Missing .onnx file")
-            if voice:
-                model_card = os.path.join(local_path, "MODEL_CARD")
-                if not os.path.exists(model_card):
-                    logger.warning(f"  -> Missing MODEL_CARD")
+            logger.warning(f"MISSING TTS [{lang}]: {local_path} (Are they flat?)")
 
 
 def validate_minimum(config: dict) -> bool:
-    """Validate minimum required models exist."""
-    
     stt = config.get("stt", {})
     stt_path = stt.get("model_path", "models/whisper-medium")
-    
     tts_configs = config.get("tts", {})
     
     stt_ok = has_stt_model(stt_path)
-    
     tts_ok = False
+    
     for lang, data in tts_configs.items():
         local_path = data.get("local_path", "")
         voice = data.get("voice", "")
-        if not local_path:
-            continue
-        
-        if validate_tts_model(local_path, voice):
+        if local_path and validate_tts_model(local_path, voice):
             tts_ok = True
             break
     
@@ -281,12 +261,6 @@ def validate_minimum(config: dict) -> bool:
     
     if not tts_ok:
         logger.error("FATAL: No valid TTS voices available")
-        return False
-    
-    return True
-    
-    if not tts_ok:
-        logger.error("FATAL: No TTS voices available")
         return False
     
     return True
@@ -312,30 +286,33 @@ def main():
         validate_minimum(config)
         return
     
-    # Check if models exist
-    stt = config.get("stt", {})
-    stt_path = stt.get("model_path", "")
-    
-    if not args.force and has_stt_model(stt_path):
-        logger.info(f"STT already exists: {stt_path}")
-        logger.info("Use --force to re-download")
+    if not args.force:
+        # Check STT
+        stt = config.get("stt", {})
+        stt_path = stt.get("model_path", "")
+        stt_ok = has_stt_model(stt_path)
         
+        # Check TTS
         tts_configs = config.get("tts", {})
+        tts_all_ok = True
         for lang, data in tts_configs.items():
             local_path = data.get("local_path", "")
-            if local_path and has_tts_model(local_path):
-                logger.info(f"TTS [{lang}] already exists: {local_path}")
-        
-        return
+            voice = data.get("voice", "")
+            if local_path and not validate_tts_model(local_path, voice):
+                tts_all_ok = False
+                break
+                
+        if stt_ok and tts_all_ok:
+            logger.info("All models already exist in flat format.")
+            logger.info("Use --force to re-download")
+            return
     
-    # Download models
     logger.info("=" * 50)
     logger.info("Starting model download")
     logger.info("=" * 50)
     
     check_and_download_models(config)
     
-    # Validate
     logger.info("=" * 50)
     logger.info("Validating models")
     logger.info("=" * 50)
