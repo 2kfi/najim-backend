@@ -1,0 +1,16 @@
+__pycache__
+__pycache__/
+.ruff_cahce
+.ruff_cahce/
+.env
+.venv
+.venv/
+venv
+venv/
+testing
+testing/
+config.yaml
+models/TTS-CORI-EN
+models/TTS-KAREEM-ARABIC
+models/whisper-medium
+models/MedGemma

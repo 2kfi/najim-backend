@@ -1,0 +1,54 @@
+# Docker Deployment Configuration
+# Volumes are mounted at /app in container
+# Copy to config.yaml when running with Docker
+
+models:
+  storage_path: "./models"
+  download_on_startup: true
+
+app:
+  host: "0.0.0.0"
+  port: 9124
+  log_level: "INFO" #INFO or DEBUG
+
+# STT - compatible with Docker volumes
+stt:
+  model_path: "models/whisper-medium"
+  hf_repo: "Systran/faster-whisper-medium"
+  device: "auto" # CUDA, ROMc, CPU
+  compute_type: "int8" # int8 OR fp16 OR fp32
+  beam_size: 5
+
+# TTS - use local paths
+tts:
+  en:
+    local_path: "models/TTS-CORI-EN"
+    hf_repo: "rhasspy/piper-voices"
+    voice: "en.en_GB.cori.high"
+  ar:
+    local_path: "./models/TTS-KAREEM-ARABIC"
+    hf_repo: "rhasspy/piper-voices"
+    voice: "ar.ar_JO.kareem.medium"
+
+settings:
+  volume: 0.5
+  length_scale: 1.0
+  noise_scale: 1.0
+  noise_w_scale: 1.0
+  normalize_audio: false
+  nchannels: 1
+  sampwidth: 2
+  framerate: 24000
+
+# Point to host machine services
+llm:
+  api_url: "http://10.200.71.180:2312/v1" # OEPNAI-API
+  api_key: "sk-no-key-ran9do3eawa4174131djwajdpj1wahishd231" # api-key or any string for no key
+  model: "local-model"
+  timeout: 120
+
+mcp:
+  servers: # SSE over HTTP MCP servers
+    - "http://10.200.71.180:2527/sse" 
+    - "http://10.200.71.180:2528/sse"
+  max_retries: 2

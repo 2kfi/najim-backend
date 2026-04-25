@@ -1,0 +1,14 @@
+faster-whisper
+piper-tts
+huggingface_hub
+numpy<2
+fastapi
+httpx
+mcp
+openai
+requests
+uvicorn
+python-multipart
+pyyaml
+tqdm
+langdetect
