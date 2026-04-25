@@ -14,3 +14,6 @@ models/TTS-CORI-EN
 models/TTS-KAREEM-ARABIC
 models/whisper-medium
 models/MedGemma
+pre-code.py
+audio.mp3
+output/

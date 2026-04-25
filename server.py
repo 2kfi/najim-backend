@@ -23,9 +23,10 @@ MODELS_STORAGE_PATH = config["models"]["storage_path"]
 MODELS_DOWNLOAD_ON_STARTUP = config["models"]["download_on_startup"]
 
 # App
-APP_HOST = config["app"]["host"]
-APP_PORT = config["app"]["port"]
-APP_LOG_LEVEL = config["app"]["log_level"]
+APP_HOST = config["api"]["host"]
+APP_PORT = config["api"]["port"]
+APP_BASE_PATH = config["api"]["base_path"]
+APP_LOG_LEVEL = config["api"].get("log_level", "INFO")
 
 # STT
 STT_MODEL_PATH = config["stt"]["model_path"]

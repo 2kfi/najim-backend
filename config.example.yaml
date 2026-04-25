@@ -4,20 +4,33 @@
 
 models:
   storage_path: "./models"
-  download_on_startup: true
+  download_on_startup: false
 
-app:
+api:
   host: "0.0.0.0"
-  port: 9124
-  log_level: "INFO" #INFO or DEBUG
+  port: 8080
+  base_path: "/api/v1"
+
+auth:
+  api_keys:
+    "sk-dev-001":
+      name: dev-client
+      rate_limit: 100
+    "sk-prod-001":
+      name: prod-client
+      rate_limit: 500
 
 # STT - compatible with Docker volumes
 stt:
   model_path: "models/whisper-medium"
   hf_repo: "Systran/faster-whisper-medium"
   device: "auto" # CUDA, ROMc, CPU
-  compute_type: "int8" # int8 OR fp16 OR fp32
+  compute_type: "int8" # int8 OR fp16 OR fp32 OR int8_float16
   beam_size: 5
+  vad_filter: true
+  vad_threshold: 0.5
+  vad_min_speech_duration_ms: 250
+  vad_min_silence_duration_ms: 200
 
 # TTS - use local paths
 tts:
@@ -25,30 +38,32 @@ tts:
     local_path: "models/TTS-CORI-EN"
     hf_repo: "rhasspy/piper-voices"
     voice: "en.en_GB.cori.high"
+    use_cuda: false
   ar:
     local_path: "./models/TTS-KAREEM-ARABIC"
     hf_repo: "rhasspy/piper-voices"
     voice: "ar.ar_JO.kareem.medium"
+    use_cuda: false
 
 settings:
   volume: 0.5
   length_scale: 1.0
   noise_scale: 1.0
   noise_w_scale: 1.0
-  normalize_audio: false
+  normalize_audio: true
   nchannels: 1
   sampwidth: 2
   framerate: 24000
+  use_cuda: false
 
-# Point to host machine services
 llm:
-  api_url: "http://10.200.71.180:2312/v1" # OEPNAI-API
-  api_key: "sk-no-key-ran9do3eawa4174131djwajdpj1wahishd231" # api-key or any string for no key
+  api_url: "http://10.200.71.180:2312/v1" # OPEN-AI-API
+  api_key: "sk-no-key-ran9do3eawa4174131djwajdpj1wahishd231"
   model: "local-model"
   timeout: 120
 
 mcp:
-  servers: # SSE over HTTP MCP servers
-    - "http://10.200.71.180:2527/sse" 
+  servers:
+    - "http://10.200.71.180:2527/sse"
     - "http://10.200.71.180:2528/sse"
   max_retries: 2
