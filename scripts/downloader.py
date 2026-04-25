@@ -48,7 +48,7 @@ def voice_to_filenames(voice: str) -> dict:
         logger.warning(f"Invalid voice format: {voice} (expected: lang.region.name.quality)")
         return {"onnx": "*.onnx", "config": "*.onnx.json", "model_card": "MODEL_CARD"}
     
-    lang_region = parts[0] + "_" + parts[1]      # "en_GB"
+    lang_region = parts[1]      # "en_GB" or "ar_JO"
     voice_name = parts[2]                      # "cori"
     quality = parts[3]                         # "high"
     
@@ -84,19 +84,20 @@ def get_allow_patterns(model_type: str, hf_repo: str, voice: str = None) -> list
     """Generate allow patterns to download only needed files."""
     
     if model_type == "stt":
-        # STT - download only specific model size
+        # STT - faster-whisper uses files like: model.bin, config.json, tokenizer.json
+        # No "medium" in filename - it's just model.bin!
         if "tiny" in hf_repo.lower():
-            return ["*tiny*", "*tiny*.bin", "*tiny/*.bin"]
+            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
         elif "small" in hf_repo.lower():
-            return ["*small*", "*small*.bin", "*small/*.bin"]
+            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
         elif "base" in hf_repo.lower():
-            return ["*base*", "*base*.bin", "*base/*.bin"]
+            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
         elif "medium" in hf_repo.lower():
-            return ["*medium*", "*medium*.bin", "*medium/*.bin"]
+            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
         elif "large" in hf_repo.lower():
-            return ["*large-v3*", "*large-v3*.bin", "*large-v3/*.bin"]
+            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
         else:
-            return ["*.bin"]
+            return ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"]
     
     elif model_type == "tts" and voice:
         # TTS - download only specific voice files
