@@ -7,6 +7,7 @@ import glob
 import yaml
 import json
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,8 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from faster_whisper import WhisperModel
 from piper import PiperVoice, SynthesisConfig
 from openai import AsyncOpenAI
-from mcp import ClientSession
-from mcp.client.sse import sse_client
+from scripts.mcp import MCPWrapper
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -62,6 +62,29 @@ def get_mcp_config() -> dict:
     return config.get("mcp", {})
 
 
+def get_mcp_servers() -> list[dict]:
+    """Get MCP servers list with url and api_key."""
+    mcp = get_mcp_config()
+    servers = mcp.get("servers", [])
+    if not servers:
+        return []
+    if isinstance(servers[0], str):
+        return [{"url": s, "api_key": ""} for s in servers]
+    return servers
+
+
+def get_mcp_settings() -> dict:
+    """Get MCP timing and other settings."""
+    mcp = get_mcp_config()
+    return {
+        "sse_read_timeout": mcp.get("sse_read_timeout", 300.0),
+        "connect_timeout": mcp.get("connect_timeout", 30.0),
+        "tool_timeout": mcp.get("tool_timeout", 60.0),
+        "max_retries": mcp.get("max_retries", 2),
+        "max_tool_loops": mcp.get("max_tool_loops", 5),
+    }
+
+
 def find_onnx_file(folder_path: str) -> str:
     onnx_files = glob.glob(os.path.join(folder_path, "*.onnx"))
     if not onnx_files:
@@ -101,7 +124,8 @@ LLM_API_KEY = llm_cfg.get("api_key", "")
 LLM_MODEL = llm_cfg.get("model", "gpt-4o-mini")
 LLM_TIMEOUT = llm_cfg.get("timeout", 120)
 
-MCP_SERVERS = mcp_cfg.get("servers", [])
+MCP_SERVERS = get_mcp_servers()
+MCP_SETTINGS = get_mcp_settings()
 
 VOICE_MODELS = get_voice_models()
 
@@ -125,9 +149,7 @@ syn_config = SynthesisConfig(
 )
 
 TTS_VOICES = {}
-MCP_SESSIONS = {}
-MCP_TOOLS = []
-openai_client = None
+mcp_wrapper: Optional[MCPWrapper] = None
 
 logger.info(f"Loading Whisper model: {MODEL_PATH}")
 whisper_model = WhisperModel(MODEL_PATH, device=DEVICE, compute_type=COMPUTE_TYPE)
@@ -169,60 +191,9 @@ def mcp_tools_to_openai_tools(mcp_tools: list) -> list:
 
 
 async def call_llm_with_mcp(user_message: str) -> str:
-    global MCP_SESSIONS
-
-    if not openai_client:
-        raise RuntimeError("LLM client not initialized")
-
-    if not MCP_TOOLS:
-        messages = [{"role": "user", "content": user_message}]
-        response = await openai_client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=messages
-        )
-        return response.choices[0].message.content
-
-    messages = [{"role": "user", "content": user_message}]
-    tools = mcp_tools_to_openai_tools(MCP_TOOLS)
-
-    response = await openai_client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=messages,
-        tools=tools
-    )
-
-    message = response.choices[0].message
-
-    if not message.tool_calls:
-        return message.content
-
-    messages.append({"role": "assistant", "content": message.content, "tool_calls": [
-        {"id": tc.id, "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-        for tc in message.tool_calls
-    ]})
-
-    for tool_call in message.tool_calls:
-        tool_name = tool_call.function.name
-        tool_args = json.loads(tool_call.function.arguments)
-
-        for server_name, session in MCP_SESSIONS.items():
-            try:
-                result = await session.call_tool(tool_name, tool_args)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": str(result.content)
-                })
-                break
-            except Exception:
-                continue
-
-    final_response = await openai_client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=messages
-    )
-
-    return final_response.choices[0].message.content
+    if not mcp_wrapper:
+        raise RuntimeError("MCP wrapper not initialized")
+    return await mcp_wrapper.run_query(user_message)
 
 
 async def _synthesize_one(text: str, voice: PiperVoice, output_path: str):
@@ -294,51 +265,30 @@ async def cleanup_files(*paths):
             pass
 
 
-async def connect_mcp_server(url: str, server_name: str):
-    try:
-        logger.info(f"Connecting to MCP server: {url}")
-        async with sse_client(url, timeout=30.0, sse_read_timeout=300.0) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools_result = await session.list_tools()
-                MCP_SESSIONS[server_name] = session
-                tools = tools_result.tools
-                MCP_TOOLS.extend(tools)
-                logger.info(f"MCP server '{server_name}' connected with {len(tools)} tools")
-                return True
-    except Exception as e:
-        logger.warning(f"Failed to connect to MCP server {url}: {e}")
-        return False
-
-
-async def init_llm_client():
-    global openai_client
-    if LLM_API_URL and LLM_API_KEY:
-        openai_client = AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_API_URL, timeout=LLM_TIMEOUT)
-        logger.info(f"LLM client initialized: {LLM_API_URL}")
-    else:
-        logger.warning("LLM not configured - missing api_url or api_key")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global mcp_wrapper
+
     preload_voices()
     logger.info("All TTS voices preloaded on startup")
 
-    for url in MCP_SERVERS:
-        server_name = url.split("/")[-2]
-        await connect_mcp_server(url, server_name)
-
-    await init_llm_client()
+    mcp_wrapper = MCPWrapper(
+        llama_base_url=LLM_API_URL,
+        llama_model=LLM_MODEL,
+        mcp_servers=MCP_SERVERS,
+        api_key=LLM_API_KEY,
+        timeout=LLM_TIMEOUT,
+        max_tool_loops=MCP_SETTINGS.get("max_tool_loops", 5),
+        max_retries=MCP_SETTINGS.get("max_retries", 2),
+        mcp_defaults=MCP_SETTINGS,
+    )
+    await mcp_wrapper.initialize_servers()
 
     yield
 
-    logger.info("Closing MCP sessions...")
-    for session in MCP_SESSIONS.values():
-        try:
-            await session.close()
-        except Exception as e:
-            logger.warning(f"Error closing MCP session: {e}")
+    logger.info("Closing MCP connections...")
+    if mcp_wrapper:
+        await mcp_wrapper.close()
     logger.info("Shutting down")
 
 
@@ -382,12 +332,16 @@ async def api_key_auth(request, call_next):
 @app.get("/health")
 async def health():
     """Health check endpoint"""
+    mcp_servers = []
+    if mcp_wrapper:
+        for mgr in mcp_wrapper.mcp_managers:
+            mcp_servers.append(mgr.url)
     return {
         "status": "healthy",
         "stt_model": MODEL_PATH,
         "stt_device": DEVICE,
         "tts_voices": list(TTS_VOICES.keys()),
-        "mcp_servers": list(MCP_SESSIONS.keys()),
+        "mcp_servers": mcp_servers,
         "llm_url": LLM_API_URL,
     }
 

@@ -57,13 +57,17 @@ settings:
   use_cuda: false
 
 llm:
-  api_url: "http://10.200.71.180:2312/v1" # OPEN-AI-API
-  api_key: "sk-no-key-ran9do3eawa4174131djwajdpj1wahishd231"
+#  api_url: "http://10.200.71.180:2312/v1" # OPEN-AI-API
+#  api_key: "sk-no-key-required"
   model: "local-model"
   timeout: 120
 
 mcp:
-  servers:
-    - "http://10.200.71.180:2527/sse"
-    - "http://10.200.71.180:2528/sse"
-  max_retries: 1
+  servers: []
+#    - url: "http://10.200.71.180:2527/sse"
+#      api_key: ""
+  sse_read_timeout: 300.0
+  connect_timeout: 30.0
+  tool_timeout: 60.0
+  max_retries: 2
+  max_tool_loops: 5
