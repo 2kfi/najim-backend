@@ -66,4 +66,4 @@ mcp:
   servers:
     - "http://10.200.71.180:2527/sse"
     - "http://10.200.71.180:2528/sse"
-  max_retries: 2
+  max_retries: 1

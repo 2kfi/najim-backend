@@ -104,7 +104,6 @@ def get_allow_patterns(model_type: str, hf_repo: str, voice: str = None) -> list
 def get_ignore_patterns(model_type: str) -> list:
     """Patterns to exclude."""
     
-    # ADD THIS: If it's STT, ignore nothing and download the whole repo
     if model_type == "stt":
         return []
     
