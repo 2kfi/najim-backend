@@ -1,11 +1,12 @@
 name: najim-backend
 services:
     najim-backend-dev:
+        build: .
         env_file:
             - .env
         ports:
             - 2222:22
             - 9092:8080
         volumes:
-        - ./:/app-files
-        image: najim-backend-pre
+            - ./models:/app/models
+        restart: unless-stopped

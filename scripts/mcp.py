@@ -56,7 +56,7 @@ class MCPSessionManager:
                 self.connected = True
                 logger.info(f"Connected to {self.url} - Found {len(self.tools)} tools.")
             except Exception as e:
-                logger.error(f"Failed to connect to {self.url}: {e}")
+                logger.error(f"Failed to connect to {self.url}: {e}", exc_info=True)
                 await self.close()
                 raise
 
@@ -68,7 +68,7 @@ class MCPSessionManager:
         try:
             if self.exit_stack:
                 await self.exit_stack.aclose()
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Error closing session for {self.url}: {e}")
 
     async def call_tool(self, name: str, arguments: dict) -> Any:
@@ -174,7 +174,7 @@ class MCPWrapper:
         name = tool_call.function.name
         try:
             args_dict = json.loads(tool_call.function.arguments)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             return {
                 "role": "tool",
                 "tool_call_id": tool_call.id,
@@ -242,7 +242,7 @@ class MCPWrapper:
                     tools=tools_schema if tools_schema else None,
                     tool_choice="auto" if tools_schema else None,
                 )
-            except Exception as e:
+            except (OSError, TimeoutError) as e:
                 logger.error(f"LLM call failed at step {i}: {e}")
                 raise RuntimeError(f"LLM API call failed: {e}")
 

@@ -8,7 +8,8 @@ WORKDIR /app
 
 RUN apt-get update
 
-RUN apt-get install fish openssh-server nano -y --no-install-recommends  --no-install-suggests
+RUN apt-get install fish openssh-server nano -y --no-install-recommends --no-install-suggests \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /var/run/sshd
 
@@ -16,7 +17,7 @@ RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/
 
 COPY . /app
 
-RUN pip install -r /app/requirements.txt --break-system-packages
+RUN pip install --no-cache-dir -r /app/requirements.txt --break-system-packages
 
 RUN chsh -s /usr/bin/fish root
 
@@ -24,6 +25,4 @@ EXPOSE 22
 
 EXPOSE 8080
 
-EXPOSE 5000
-
-CMD bash -c "echo \"root:$ROOT_PASSWORD\" | chpasswd && /usr/sbin/sshd -D & tail -f /dev/null"
+CMD ["python", "app.py"]

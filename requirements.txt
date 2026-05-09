@@ -12,3 +12,13 @@ python-multipart
 pyyaml
 tqdm
 langdetect
+slowapi
+python-json-logger
+tenacity
+prometheus-client
+opentelemetry-api
+opentelemetry-sdk
+pydantic
+pydantic-settings
+pytest
+pytest-asyncio
