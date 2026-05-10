@@ -46,6 +46,10 @@ python app.py
 Edit `config.yaml` with your settings:
 
 ```yaml
+models:
+  storage_path: "./models"
+  download_on_startup: true
+
 api:
   host: "0.0.0.0"           # server bind address
   port: 8080               # server port
@@ -71,6 +75,9 @@ stt:
   task: "transcribe"       # transcribe or translate
   beam_size: 5
   vad_filter: true
+  vad_threshold: 0.5
+  vad_min_speech_duration_ms: 250
+  vad_min_silence_duration_ms: 200
 
 settings:
   volume: 0.75          # Increased for clarity without digital clipping
