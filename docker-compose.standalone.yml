@@ -1,0 +1,31 @@
+# =============================================================================
+# Najim Backend — Standalone (No Redis Included)
+# =============================================================================
+# You provide your own Redis. Set REDIS_URL to point to it.
+#
+# Usage:
+#   REDIS_URL="redis://:password@my-redis:6379" docker compose \
+#     -f docker-compose.standalone.yml up -d
+# =============================================================================
+
+version: "3.8"
+
+services:
+  najim:
+    build: .
+    image: najim-backend:latest
+    container_name: najim-standalone
+    ports:
+      - "${API_PORT:-8080}:8080"
+    environment:
+      REDIS_URL: "${REDIS_URL}"
+      JWT_SECRET: "${JWT_SECRET}"
+      LLM_API_KEY: "${LLM_API_KEY}"
+      LLM_MODEL: "${LLM_MODEL:-llama-3.3-70b-versatile}"
+      CLUSTER_NODE_ID: "${CLUSTER_NODE_ID:-standalone-1}"
+      STT_DEVICE: "${STT_DEVICE:-auto}"
+      STT_MODEL_NAME: "${STT_MODEL_NAME:-medium}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    volumes:
+      - ./models:/app/models
+    restart: unless-stopped

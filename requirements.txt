@@ -4,10 +4,11 @@ huggingface_hub
 numpy<2
 fastapi
 httpx
+websockets
 mcp
 openai
 requests
-uvicorn
+uvicorn[standard]
 python-multipart
 pyyaml
 tqdm
@@ -18,7 +19,9 @@ tenacity
 prometheus-client
 opentelemetry-api
 opentelemetry-sdk
-pydantic
-pydantic-settings
+pydantic>=2
+pydantic-settings>=2
+redis[hiredis]
+python-jose[cryptography]
 pytest
 pytest-asyncio

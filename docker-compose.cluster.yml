@@ -1,0 +1,112 @@
+# =============================================================================
+# Najim Backend — 3-Node Cluster + Redis
+# =============================================================================
+# Simulates the 3-node Intel Atom cluster on a single machine.
+# All nodes share the same Redis. Each has a unique CLUSTER_NODE_ID.
+#
+# Usage:
+#   docker compose -f docker-compose.cluster.yml up -d
+#
+# Required:
+#   JWT_SECRET       — Same secret across all nodes
+#   LLM_API_KEY      — Groq API key
+# =============================================================================
+
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: najim-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-najim_pass} --save 60 100
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-najim_pass}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - najim-cluster
+
+  najim-node-1:
+    build: .
+    image: najim-backend:latest
+    container_name: najim-node-1
+    ports:
+      - "${PORT_1:-8081}:8080"
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-najim_pass}@redis:6379/0"
+      JWT_SECRET: "${JWT_SECRET}"
+      LLM_API_KEY: "${LLM_API_KEY}"
+      LLM_MODEL: "${LLM_MODEL:-llama-3.3-70b-versatile}"
+      CLUSTER_NODE_ID: "node-1"
+      STT_DEVICE: "${STT_DEVICE:-auto}"
+      STT_MODEL_NAME: "${STT_MODEL_NAME:-medium}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    volumes:
+      - ./models:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - najim-cluster
+
+  najim-node-2:
+    build: .
+    image: najim-backend:latest
+    container_name: najim-node-2
+    ports:
+      - "${PORT_2:-8082}:8080"
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-najim_pass}@redis:6379/0"
+      JWT_SECRET: "${JWT_SECRET}"
+      LLM_API_KEY: "${LLM_API_KEY}"
+      LLM_MODEL: "${LLM_MODEL:-llama-3.3-70b-versatile}"
+      CLUSTER_NODE_ID: "node-2"
+      STT_DEVICE: "${STT_DEVICE:-auto}"
+      STT_MODEL_NAME: "${STT_MODEL_NAME:-medium}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    volumes:
+      - ./models:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - najim-cluster
+
+  najim-node-3:
+    build: .
+    image: najim-backend:latest
+    container_name: najim-node-3
+    ports:
+      - "${PORT_3:-8083}:8080"
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-najim_pass}@redis:6379/0"
+      JWT_SECRET: "${JWT_SECRET}"
+      LLM_API_KEY: "${LLM_API_KEY}"
+      LLM_MODEL: "${LLM_MODEL:-llama-3.3-70b-versatile}"
+      CLUSTER_NODE_ID: "node-3"
+      STT_DEVICE: "${STT_DEVICE:-auto}"
+      STT_MODEL_NAME: "${STT_MODEL_NAME:-medium}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    volumes:
+      - ./models:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - najim-cluster
+
+volumes:
+  redis-data:
+
+networks:
+  najim-cluster:
+    driver: bridge
