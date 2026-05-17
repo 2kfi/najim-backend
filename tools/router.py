@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -30,6 +31,21 @@ async def route_tool_call(
         return await run_internal_tool(tool_name, params, timeout=settings.tool.internal_timeout)
 
     elif registry.is_remote(tool_name):
+        from sessions.permissions import PermissionStore
+        from core.redis_manager import RedisManager
+        
+        redis = await RedisManager.get_instance()
+        perms = PermissionStore(redis)
+        
+        if not await perms.has_permission(device_id, tool_name):
+            logger.warning(f"Permission denied for tool {tool_name} on device {device_id}")
+            return ToolCallResult(
+                tool_name=tool_name,
+                success=False,
+                error=f"Permission denied for tool: {tool_name}",
+                duration_ms=0,
+            )
+        
         logger.info(f"Routing remote tool: {tool_name} to device {device_id}")
         bridge = await get_tool_bridge()
         record = await bridge.initiate_remote_call(
@@ -63,7 +79,6 @@ async def route_tool_calls_batch(
         tool_name = tc.get("name") or tc.get("function", {}).get("name", "")
         params = tc.get("params") or tc.get("function", {}).get("arguments", {})
         if isinstance(params, str):
-            import json
             params = json.loads(params)
         tasks.append(route_tool_call(device_id, session_id, tool_name, params))
 

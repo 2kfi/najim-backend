@@ -8,6 +8,7 @@ from core.config import get_settings
 class DeviceRegistry:
     KEY = "devices"
     WS_NODE_PREFIX = "device_ws"
+    WS_NODE_TTL = 35
 
     def __init__(self, redis: RedisManager):
         self.redis = redis
@@ -22,7 +23,7 @@ class DeviceRegistry:
             "device_id": device_id,
             "user_id": info.user_id or "",
             "host": info.host or "",
-            "port": str(info.port or ""),
+            "port": info.port if info.port else None,
             "capabilities": info.capabilities if isinstance(info.capabilities, str) else ",".join(info.capabilities),
             "status": info.status.value,
             "connected_at": now.isoformat(),
@@ -30,6 +31,7 @@ class DeviceRegistry:
             "node_id": self._settings.cluster.node_id,
         }
         await self.redis.hset_dict(self.KEY, {device_id: data})
+        await self.redis.set_with_ttl(self._ws_key(device_id), self._settings.cluster.node_id, self.WS_NODE_TTL)
 
     async def unregister(self, device_id: str) -> None:
         client = self.redis.client
@@ -67,6 +69,7 @@ class DeviceRegistry:
             data = all_devices[device_id]
             if isinstance(data, dict):
                 await self.redis.hset_dict(self.KEY, {device_id: {**data, "last_heartbeat": now}})
+        await self.redis.set_with_ttl(self._ws_key(device_id), self._settings.cluster.node_id, self.WS_NODE_TTL)
 
     async def set_status(self, device_id: str, status: DeviceStatus) -> None:
         all_devices = await self.redis.hget_all(self.KEY)

@@ -20,8 +20,9 @@ class ConversationStore:
         msg_json = msg.model_dump_json()
         length = await self.redis.rpush(self._key(device_id), msg_json)
         current_len = await self.redis.client.llen(self._key(device_id))
-        if current_len > self._settings.session.max_history * 2:
-            await self.redis.ltrim(self._key(device_id), -(self._settings.session.max_history * 2), -1)
+        if current_len > self._settings.session.max_history:
+            trim_start = max(0, current_len - self._settings.session.max_history)
+            await self.redis.ltrim(self._key(device_id), trim_start, -1)
         return length
 
     async def get_history(self, device_id: str, limit: Optional[int] = None) -> list[Message]:
@@ -29,10 +30,12 @@ class ConversationStore:
         raw = await self.redis.lrange(self._key(device_id), -max_len, -1)
         messages = []
         for item in raw:
-            if isinstance(item, str):
+            if isinstance(item, dict):
+                messages.append(Message.model_validate(item))
+            elif isinstance(item, str):
                 messages.append(Message.model_validate_json(item))
             else:
-                messages.append(Message.model_validate_json(item.decode()))
+                messages.append(Message.model_validate_json(item.decode() if isinstance(item, bytes) else item))
         return messages
 
     async def get_history_for_llm(self, device_id: str, limit: int = 50) -> list[dict[str, str]]:

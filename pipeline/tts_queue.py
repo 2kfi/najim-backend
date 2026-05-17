@@ -19,7 +19,12 @@ class TTSQueue:
         self._queue_key = "tts_queue"
 
     async def enqueue(self, device_id: str, text: str, language: str = None, priority: int = 0) -> int:
-        score = asyncio.get_event_loop().time() + priority
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        score = loop.time() + priority
         return await self.redis.zadd(self._queue_key, {f"{device_id}:{text[:50]}": score})
 
     async def dequeue(self, count: int = 1) -> list[tuple[str, str]]:

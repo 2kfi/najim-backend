@@ -47,6 +47,10 @@ services:
       STT_DEVICE: "${STT_DEVICE:-auto}"
       STT_MODEL_NAME: "${STT_MODEL_NAME:-medium}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
+      PIPELINE_STT_WORKERS: "${PIPELINE_STT_WORKERS:-1}"
+      PIPELINE_LLM_WORKERS: "${PIPELINE_LLM_WORKERS:-1}"
+      PIPELINE_TTS_WORKERS: "${PIPELINE_TTS_WORKERS:-1}"
+      PIPELINE_WS_WORKERS: "${PIPELINE_WS_WORKERS:-1}"
     volumes:
       - ./models:/app/models
     depends_on:
@@ -71,6 +75,10 @@ services:
       STT_DEVICE: "${STT_DEVICE:-auto}"
       STT_MODEL_NAME: "${STT_MODEL_NAME:-medium}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
+      PIPELINE_STT_WORKERS: "${PIPELINE_STT_WORKERS:-1}"
+      PIPELINE_LLM_WORKERS: "${PIPELINE_LLM_WORKERS:-1}"
+      PIPELINE_TTS_WORKERS: "${PIPELINE_TTS_WORKERS:-1}"
+      PIPELINE_WS_WORKERS: "${PIPELINE_WS_WORKERS:-1}"
     volumes:
       - ./models:/app/models
     depends_on:
@@ -95,6 +103,10 @@ services:
       STT_DEVICE: "${STT_DEVICE:-auto}"
       STT_MODEL_NAME: "${STT_MODEL_NAME:-medium}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
+      PIPELINE_STT_WORKERS: "${PIPELINE_STT_WORKERS:-1}"
+      PIPELINE_LLM_WORKERS: "${PIPELINE_LLM_WORKERS:-1}"
+      PIPELINE_TTS_WORKERS: "${PIPELINE_TTS_WORKERS:-1}"
+      PIPELINE_WS_WORKERS: "${PIPELINE_WS_WORKERS:-1}"
     volumes:
       - ./models:/app/models
     depends_on:

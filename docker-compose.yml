@@ -52,6 +52,10 @@ services:
       LOG_LEVEL: "${LOG_LEVEL:-info}"
       DEBUG: "${DEBUG:-false}"
       MODEL_DOWNLOAD: "${MODEL_DOWNLOAD:-false}"
+      PIPELINE_STT_WORKERS: "${PIPELINE_STT_WORKERS:-1}"
+      PIPELINE_LLM_WORKERS: "${PIPELINE_LLM_WORKERS:-1}"
+      PIPELINE_TTS_WORKERS: "${PIPELINE_TTS_WORKERS:-1}"
+      PIPELINE_WS_WORKERS: "${PIPELINE_WS_WORKERS:-1}"
     volumes:
       - ./models:/app/models
     depends_on:

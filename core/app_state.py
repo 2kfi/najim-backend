@@ -20,7 +20,7 @@ class AppState:
     llm_client: Optional[AsyncOpenAI] = None
     syn_config: Optional[SynthesisConfig] = None
     initialized: bool = False
-    _load_lock: asyncio.Lock = None
+    _load_lock: Optional[asyncio.Lock] = None
 
     @classmethod
     def _get_lock(cls) -> asyncio.Lock:
@@ -36,7 +36,6 @@ class AppState:
             if cls.initialized:
                 return
             settings = get_settings()
-            cls._load_lock = asyncio.Lock()
 
             cls.syn_config = SynthesisConfig(
                 volume=settings.tts.synthesis.volume,

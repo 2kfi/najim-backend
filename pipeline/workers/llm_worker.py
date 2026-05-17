@@ -17,19 +17,24 @@ async def llm_handler(data: dict) -> dict:
     device_id = data.get("device_id", "")
     session_id = data.get("session_id", device_id)
     text = data.get("text", "")
+    language = data.get("language", "")
 
     runner = LLMRunner(redis, conv_store)
 
     if not text:
-        return {"device_id": device_id, "session_id": session_id, "text": "", "response": ""}
+        logger.warning(f"LLM [{device_id}]: empty transcription text, skipping")
+        return {"device_id": device_id, "session_id": session_id, "text": "", "response": "", "language": language}
 
     response = await runner.run_query(session_id, text)
+    response_preview = response[:100] if response else "(empty)"
+    logger.info(f"LLM [{device_id}]: response ({len(response)} chars) -> {response_preview}")
 
     return {
         "device_id": device_id,
         "session_id": session_id,
         "input_text": text,
         "response": response,
+        "language": language,
     }
 
 
@@ -45,5 +50,6 @@ async def process_llm_jobs(redis: RedisManager, consumer: str):
         handler=llm_handler,
         poll_timeout=settings.pipeline.poll_timeout_ms,
         max_retries=settings.pipeline.llm_max_retries,
+        target_stream=settings.pipeline.tts_stream,
     )
     await worker.start()

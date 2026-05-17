@@ -34,9 +34,8 @@ class LLMRunner:
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
+        messages.extend(history)
         messages.append({"role": "user", "content": user_message})
-        for h in history:
-            messages.append(h)
 
         tools_schema = await self._get_tools_schema()
 

@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 class ToolBridge:
     RESPONSE_KEY_PREFIX = "tool_resp"
+    CORRELATION_KEY_PREFIX = "tool_corr"
+    MAX_POLL_ITERATIONS = 100
 
     def __init__(self, redis: RedisManager):
         self.redis = redis
@@ -21,6 +23,9 @@ class ToolBridge:
 
     def _resp_key(self, correlation_id: str) -> str:
         return f"{self.RESPONSE_KEY_PREFIX}:{correlation_id}"
+
+    def _corr_key(self, correlation_id: str) -> str:
+        return f"{self.CORRELATION_KEY_PREFIX}:{correlation_id}"
 
     async def initiate_remote_call(
         self,
@@ -44,6 +49,12 @@ class ToolBridge:
             session_id=session_id,
             initiated_at=now,
             status="pending",
+        )
+
+        await self.redis.set_with_ttl(
+            self._corr_key(correlation_id),
+            {"device_id": device_id, "tool_name": tool_name, "status": "pending"},
+            60
         )
 
         from sessions.device_registry import DeviceRegistry
@@ -82,24 +93,33 @@ class ToolBridge:
             return {"error": str(e)}
 
     async def _poll_response(self, resp_key: str) -> Any:
-        while True:
+        iterations = 0
+        while iterations < self.MAX_POLL_ITERATIONS:
             key, value = await self.redis.blpop(resp_key, timeout=2)
             if value is not None:
                 return value
+            iterations += 1
+            await asyncio.sleep(0.1)
+        raise TimeoutError(f"Poll response exceeded max iterations for {resp_key}")
 
     async def handle_response(self, correlation_id: str, result: Any, error: Optional[str] = None) -> None:
         resp_key = self._resp_key(correlation_id)
+        corr_key = self._corr_key(correlation_id)
         payload = result if error is None else {"error": error, "result": result}
         await self.redis.rpush(resp_key, payload)
         await self.redis.expire(resp_key, 60)
+        await self.redis.delete(corr_key)
 
 
 _bridge: Optional[ToolBridge] = None
+_bridge_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def get_tool_bridge() -> ToolBridge:
     global _bridge
     if _bridge is None:
-        redis = await RedisManager.get_instance()
-        _bridge = ToolBridge(redis)
+        async with _bridge_lock:
+            if _bridge is None:
+                redis = await RedisManager.get_instance()
+                _bridge = ToolBridge(redis)
     return _bridge

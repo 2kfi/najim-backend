@@ -72,6 +72,7 @@ async def delete_session(device_id: str, claims: dict = Depends(verify_jwt)):
     await conv_store.clear(device_id)
     await session_reg.delete(device_id)
     logger.info(f"Session deleted for device {device_id}")
+    return None
 
 
 @router.get("/sessions", response_model=list[SessionData])

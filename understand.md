@@ -872,46 +872,132 @@ Authorization: Bearer <admin_token>
 
 A pipeline is a sequence of processing steps. Audio goes in one end, audio comes out the other end, with text transformations in the middle.
 
-### The Three Stages
+### The Four Stages (Actually!)
 
 ```
-Audio In  ──►  STT  ──►  LLM  ──►  TTS  ──►  Audio Out
-                │            │            │
-                ▼            ▼            ▼
-           Speech to     Language     Text to
-           Text          Model        Speech
-           (Whisper)     (Groq API)   (Piper TTS)
-           Local         Remote API   Local
+Audio In  ──►  STT  ──►  LLM  ──►  TTS  ──►  WS Sender  ──►  Audio Out
+                │            │            │           │
+                ▼            ▼            ▼           ▼
+           Speech to     Language     Text to     WebSocket
+           Text          Model        Speech      Delivery
+           (Whisper)     (Groq API)   (Piper)     (to phone)
+           Local         Remote API   Local       Local
 ```
 
-### Stage 1: STT (Speech-to-Text) — `pipeline/stt_buffer.py`
+Each stage is **decoupled** by a Redis Stream. This is the **checkpoint pipeline** — every stage writes its output to a stream before the next stage begins.
+
+### Redis Streams: The Checkpoints
 
 ```
-Input:  raw audio bytes (WAV, 16kHz)
+┌─────────────┐    XADD        ┌─────────────┐    XADD        ┌─────────────┐
+│ WS Handler  │ ─────────────► │  stt_jobs   │ ─────────────► │  llm_jobs   │
+│             │                │   Stream    │                │   Stream    │
+└─────────────┘                └──────┬──────┘                └──────┬──────┘
+                                      │                              │
+                                      ▼                              ▼
+                               ┌─────────────┐               ┌─────────────┐
+                               │ STT Worker  │               │ LLM Worker  │
+                               │ XREADGROUP  │               │ XREADGROUP  │
+                               └─────────────┘               └─────────────┘
+                                                                     │
+                                                                     │ XADD
+                                                                     ▼
+┌─────────────┐    send_json      ┌─────────────┐    XADD        ┌─────────────┐
+│    Phone    │ ◄─────────────── │ WS Sender   │ ◄───────────── │  tts_jobs   │
+│             │                   │ Worker      │                │   Stream    │
+└─────────────┘                   └─────────────┘                └──────┬──────┘
+                                        ▲                              │
+                                        │ XREADGROUP                   ▼
+                                        │                       ┌─────────────┐
+                                        │                       │ TTS Worker  │
+                                        │                       │ XREADGROUP  │
+                                        │                       └─────────────┘
+```
+
+**What this means:**
+
+| Stream | Who Writes | Who Reads | What's Inside |
+|--------|-----------|-----------|---------------|
+| `stt_jobs` | WS Handler | STT Worker | audio_data (base64), device_id, language |
+| `llm_jobs` | STT Worker | LLM Worker | transcript, device_id, language |
+| `tts_jobs` | LLM Worker | TTS Worker | response text, device_id, language |
+| `responses` | TTS Worker | WS Sender | audio_data (base64), device_id, text |
+
+### Why Streams Instead of Function Calls?
+
+**Old way (function calls):**
+```
+Phone sends audio → Node-1 calls stt() → Node-1 calls llm() → Node-1 calls tts()
+                                    │
+                                    └── If Node-1 crashes here, EVERYTHING IS LOST
+```
+
+**New way (streams):**
+```
+Phone sends audio → XADD stt_jobs → STT Worker picks it up
+                                         │
+                                         └── If this worker crashes, job is still in stream
+                                             Another node's STT worker picks it up
+```
+
+Each stream entry is a **checkpoint**. If any worker crashes, the job stays in the stream. Another node picks it up.
+
+### Stage 1: STT (Speech-to-Text)
+
+```
+Location: pipeline/workers/stt_worker.py
+Stream:   stt_jobs
+
+Input (from stream):
+  - audio_data: base64-encoded WAV (16kHz mono)
+  - device_id: which phone sent it
+  - language: optional language hint
+
 Process:
-  1. Save audio to temporary file
-  2. Call Whisper.transcribe(file) in a thread (CPU-bound)
-  3. Whisper returns: text + language detected + confidence
-Output: transcribed text
+  1. Base64 decode → raw audio bytes
+  2. Write to temp WAV file
+  3. Run Whisper in a thread (CPU-bound, blocking)
+  4. Get: text + detected language + confidence
+  5. XADD to llm_jobs stream
+  6. XACK to acknowledge this job is done
+  7. Delete temp file
+
+Output (to llm_jobs):
+  - text: transcribed text
+  - device_id, session_id
+  - language, probability
 
 Time: ~100-500ms depending on audio length
-Model: faster-whisper-medium (downloaded once on startup)
-Runs: locally on the cluster node (no internet needed)
+Model: faster-whisper-medium (loaded once on startup)
 ```
 
-### Stage 2: LLM (Large Language Model) — `pipeline/llm_runner.py`
+### Stage 2: LLM (Large Language Model)
 
 ```
-Input:  transcribed text + conversation history
+Location: pipeline/workers/llm_worker.py
+Stream:   llm_jobs
+
+Input (from stream):
+  - text: what the user said
+  - device_id: which phone
+  - language: detected language
+
 Process:
-  1. Load conversation history from Redis
-  2. Send to Groq API (llama-3.3-70b-versatile)
-  3. LLM may call 0-5 tools (the "tool loop")
-  4. For each tool call → route to internal or remote
-  5. LLM generates final response
-Output: response text
+  1. Load conversation history from Redis (conv:{device_id})
+  2. Build messages: [system prompt, history..., user text]
+  3. Send to Groq API (llama-3.3-70b-versatile)
+  4. If LLM calls tools → execute them (up to 5 iterations)
+  5. Get final response text
+  6. Save to conversation history
+  7. XADD to tts_jobs stream
+  8. XACK to acknowledge
 
-Time: ~500ms-3s (network latency to Groq)
+Output (to tts_jobs):
+  - response: LLM's reply text
+  - device_id, session_id
+  - input_text, language
+
+Time: ~500ms-3s (depends on Groq API + tool calls)
 Runs: needs internet (calls Groq API)
 ```
 
@@ -926,21 +1012,98 @@ LLM: "I need to call get_weather twice"
 LLM: "The weather in Cairo is 32°C and in Alexandria it's 28°C."
 ```
 
-### Stage 3: TTS (Text-to-Speech) — `pipeline/tts_queue.py`
+### Stage 3: TTS (Text-to-Speech)
 
 ```
-Input:  text response
+Location: pipeline/workers/tts_worker.py
+Stream:   tts_jobs
+
+Input (from stream):
+  - response: text to speak
+  - device_id: which phone
+  - language: which voice to use
+
 Process:
-  1. Load Piper voice model for the user's language
-  2. Execute TTS in a thread (CPU-bound)
-  3. Generate WAV audio file
-  4. Read file → base64 encode
-Output: base64-encoded WAV audio
+  1. Get Piper voice for this language
+  2. Run synthesis in a thread (CPU-bound)
+  3. Get WAV audio bytes
+  4. Base64 encode
+  5. XADD to responses stream
+  6. XACK to acknowledge
+
+Output (to responses):
+  - audio: base64-encoded WAV (22050Hz mono)
+  - text: what was spoken
+  - device_id
 
 Time: ~200-500ms
-Model: Piper (downloaded once on startup)
-Runs: locally (no internet needed)
+Model: Piper (loaded lazily on first use)
 Voices: English (Cori), Arabic (Kareem)
+```
+
+### Stage 4: WS Sender (WebSocket Delivery)
+
+```
+Location: pipeline/workers/ws_sender.py
+Stream:   responses
+
+Input (from stream):
+  - audio: base64-encoded audio
+  - text: the spoken text
+  - device_id: which phone to send to
+
+Process:
+  1. Check if device is connected to THIS node
+  2. If yes → send via WebSocket
+  3. If no → silently drop (phone reconnected elsewhere or disconnected)
+  4. XACK to acknowledge
+
+Output:
+  - WebSocket message to phone: {"type": "audio_chunk", "audio_data": ..., "text": ...}
+
+Time: <10ms (just sending data)
+```
+
+**Why check if device is on this node?**
+
+The phone is connected to ONE node (e.g., node-1). But TTS Worker could be on node-2. The `responses` stream is read by all nodes. Only the node with the active WebSocket should send.
+
+### Consumer Groups: How Multiple Nodes Share Work
+
+Each stream has a **consumer group** called `najim_workers`. This is a Redis feature that distributes messages across consumers.
+
+```
+Stream: stt_jobs
+Consumer Group: najim_workers
+Consumers: worker:node-1:stt-0, worker:node-2:stt-0, worker:node-3:stt-0
+
+When a job arrives:
+  - Redis gives it to ONE consumer (round-robin or idlest)
+  - That consumer processes it
+  - Other consumers don't see it (unless it's not acknowledged)
+
+If consumer crashes:
+  - Job stays "pending" in the stream
+  - After timeout, another consumer can claim it
+```
+
+### Retry Logic with Exponential Backoff
+
+When a handler fails, we don't immediately retry. We use **exponential backoff**:
+
+```
+Attempt 1 fails → wait 1 second → retry
+Attempt 2 fails → wait 2 seconds → retry
+Attempt 3 fails → wait 4 seconds → retry
+Attempt 4 fails → DISCARD (give up, acknowledge to remove from stream)
+```
+
+This prevents hammering a failing service. The backoff doubles each time: 1s → 2s → 4s → 8s.
+
+```python
+# In pipeline/workers/base.py
+backoff_time = backoff_base * (2 ** delivery_count)  # 1, 2, 4, 8, ...
+await asyncio.sleep(backoff_time)
 ```
 
 ### Why Is the Pipeline Async?
@@ -1008,16 +1171,319 @@ When you start the server (`uvicorn app:app`):
    - Send disconnect message to each device
    - Mark devices as offline in Redis
 
-2. Close Pub/Sub subscriptions
+2. Stop pipeline workers
+   - Cancel asyncio tasks
+   - Workers finish current job, then exit
 
-3. Close Redis connection pool
+3. Close Pub/Sub subscriptions
 
-4. Unload ML models (free memory)
+4. Close Redis connection pool
+
+5. Unload ML models (free memory)
 ```
 
 ---
 
-## 19. The Full Data Flow — A Complete Trace
+## 19. Deep Dive: Redis Streams and Consumer Groups
+
+### What Is a Redis Stream?
+
+A **stream** is an append-only log. You can only ADD to the right, never modify in the middle, never delete individual entries (except trimming).
+
+```
+Stream: stt_jobs
+
+Entry 1: {id: "1700000000001-0", data: {device_id: "phone-1", audio_data: "..."}} 
+Entry 2: {id: "1700000000002-0", data: {device_id: "phone-2", audio_data: "..."}}
+Entry 3: {id: "1700000000003-0", data: {device_id: "phone-1", audio_data: "..."}}
+         ▲
+         │
+         └── ID is auto-generated: timestamp-sequence
+```
+
+### Basic Stream Commands
+
+```bash
+# Add entry
+XADD stt_jobs * device_id phone-1 audio_data "base64..."
+# Returns: "1700000000001-0" (the generated ID)
+
+# Read all entries
+XRANGE stt_jobs - +
+
+# Read new entries (blocking)
+XREAD BLOCK 5000 STREAMS stt_jobs $
+# Waits up to 5 seconds for new entries
+
+# Trim old entries (keep last 1000)
+XTRIM stt_jobs MAXLEN 1000
+```
+
+### What Is a Consumer Group?
+
+A **consumer group** is like a team of workers sharing a queue. Each message is delivered to only ONE consumer in the group.
+
+```
+Stream: stt_jobs
+Group: najim_workers
+Consumers: [worker-node-1-stt, worker-node-2-stt, worker-node-3-stt]
+
+Entry 1 → goes to worker-node-1-stt
+Entry 2 → goes to worker-node-2-stt
+Entry 3 → goes to worker-node-3-stt
+Entry 4 → goes to worker-node-1-stt (round-robin)
+```
+
+### Consumer Group Commands
+
+```bash
+# Create group (once)
+XGROUP CREATE stt_jobs najim_workers $ MKSTREAM
+# $ = start from now (new messages only)
+# 0 = start from beginning (all messages)
+# MKSTREAM = create stream if it doesn't exist
+
+# Read as a consumer
+XREADGROUP GROUP najim_workers consumer-node-1-stt COUNT 1 BLOCK 5000 STREAMS stt_jobs >
+# The ">" means "give me new messages I haven't seen"
+
+# Acknowledge (mark as processed)
+XACK stt_jobs najim_workers 1700000000001-0
+
+# Check pending messages (not yet acknowledged)
+XPENDING stt_jobs najim_workers
+# Returns: total pending, min ID, max ID, consumers with pending count
+
+# Detailed pending info
+XPENDING stt_jobs najim_workers - + 10
+# Returns: message ID, consumer, idle time (ms), delivery count
+```
+
+### The Lifecycle of a Stream Entry
+
+```
+1. XADD stt_jobs → Entry created, ID = "1700000000001-0"
+
+2. XREADGROUP by worker-node-1-stt → Entry is now "pending"
+   Redis tracks: this entry belongs to worker-node-1-stt
+   Delivery count = 1
+
+3a. SUCCESS: Worker processes, XACK → Entry is "processed" (still in stream, but marked done)
+
+3b. FAILURE: Worker crashes without XACK → Entry stays "pending"
+   After visibility timeout, another worker can claim it
+   Delivery count increments
+
+4. After max_retries deliveries → We XACK to discard it (give up)
+```
+
+### Claiming Pending Messages
+
+If a consumer crashed with pending messages:
+
+```bash
+# See what's pending
+XPENDING stt_jobs najim_workers - + 10
+
+# Claim pending messages for yourself
+XCLAIM stt_jobs najim_workers worker-node-2-stt 5000 1700000000001-0
+# 5000 = min idle time (ms) before you can claim it
+# This transfers ownership from crashed consumer to you
+```
+
+Our implementation handles this automatically: after each failed attempt, we sleep (backoff) and the consumer group will redeliver.
+
+### Why Consumer Groups Instead of Plain XREAD?
+
+| Plain XREAD | Consumer Group (XREADGROUP) |
+|-------------|---------------------------|
+| All consumers see all messages | Each message goes to ONE consumer |
+| You track what's processed manually | Redis tracks it for you |
+| No automatic retry | Automatic retry via delivery count |
+| No crash recovery | Pending messages can be claimed |
+| No scaling | Add consumers, they auto-share work |
+
+### Visual: How Messages Flow Through Consumer Group
+
+```
+                    stt_jobs Stream
+                    ┌─────────────────────────────────┐
+                    │ Msg 1 │ Msg 2 │ Msg 3 │ Msg 4 │ Msg 5 │
+                    └────┬───┴───┬───┴───────┴───┬───┴───────┘
+                         │       │               │
+         ┌───────────────┼───────┼───────────────┤
+         │               │       │               │
+         ▼               ▼       ▼               ▼
+   ┌──────────┐   ┌──────────┐   ┌──────────┐
+   │ Node-1   │   │ Node-2   │   │ Node-3   │
+   │ Consumer │   │ Consumer │   │ Consumer │
+   │          │   │          │   │          │
+   │ Msg 1 ✓  │   │ Msg 2 ✓  │   │ Msg 3 ✓  │
+   │ Msg 4 ✓  │   │ Msg 5 ⏳ │   │          │
+   └──────────┘   └──────────┘   └──────────┘
+         │               │
+         │               └── Processing... (if crashes, Msg 5 becomes pending)
+         │
+         └── ✓ = XACK'd (processed successfully)
+```
+
+### Our Pipeline Streams
+
+| Stream | Consumer Group | What Happens |
+|--------|---------------|--------------|
+| `stt_jobs` | `najim_workers` | Audio → Text |
+| `llm_jobs` | `najim_workers` | Text → Response (may call tools) |
+| `tts_jobs` | `najim_workers` | Response → Audio |
+| `responses` | `najim_workers` | Audio → WebSocket send |
+
+All use the same group name because they're independent streams (not competing for same messages).
+
+---
+
+## 20. Deep Dive: WebSocket Protocol
+
+### Why WebSocket?
+
+**HTTP** is request-response. Client asks, server answers. Done. Connection closes.
+
+```
+Client: GET /weather?city=Cairo
+Server: {"temp": 32}
+[Connection closes]
+```
+
+**WebSocket** is a persistent, two-way connection. Both sides can send at any time.
+
+```
+Client: Connect ws://server/connect
+Server: Accept
+[Connection stays open]
+
+Client: Here's audio chunk 1
+Server: Got it
+Client: Here's audio chunk 2
+Server: Here's interim transcript
+Server: I need to call a tool
+Client: Here's the tool result
+Server: Here's the final audio
+... (continues until either side closes)
+```
+
+### WebSocket Handshake
+
+```
+1. Client sends HTTP request with upgrade header:
+   GET /api/v1/connect?token=eyJhbGci... HTTP/1.1
+   Host: localhost:8080
+   Upgrade: websocket
+   Connection: Upgrade
+   Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+   Sec-WebSocket-Version: 13
+
+2. Server validates JWT from query parameter
+   - If invalid → HTTP 401, connection rejected
+   - If valid → proceed
+
+3. Server sends HTTP 101 Switching Protocols:
+   HTTP/1.1 101 Switching Protocols
+   Upgrade: websocket
+   Connection: Upgrade
+   Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+
+4. Now it's a WebSocket connection, not HTTP anymore.
+   Both sides can send frames (messages).
+```
+
+### Message Types: Client → Server
+
+| Type | When | Example |
+|------|------|---------|
+| `connect` | First message after handshake | `{"type": "connect", "capabilities": ["gps", "file_index"]}` |
+| `heartbeat` | Every 30 seconds | `{"type": "heartbeat"}` |
+| `audio` | User speaks | `{"type": "audio", "audio_data": "base64...", "language": "en"}` |
+| `tool_response` | After executing a tool | `{"type": "tool_response", "correlation_id": "uuid", "result": {...}}` |
+| `disconnect` | Graceful close | `{"type": "disconnect"}` |
+
+### Message Types: Server → Client
+
+| Type | When | Example |
+|------|------|---------|
+| `connected` | After `connect` message | `{"type": "connected", "device_id": "...", "node_id": "..."}` |
+| `heartbeat_ack` | After `heartbeat` | `{"type": "heartbeat_ack", "timestamp": 1700000000}` |
+| `accepted` | After receiving audio | `{"type": "accepted", "message": "Processing started"}` |
+| `interim_transcript` | During STT | `{"type": "interim_transcript", "text": "What's the..."}` |
+| `thinking` | During LLM | `{"type": "thinking", "text": "Let me check..."}` |
+| `tool_request` | LLM needs tool | `{"type": "tool_request", "correlation_id": "...", "tool_name": "get_gps", "params": {...}}` |
+| `audio_chunk` | Final response | `{"type": "audio_chunk", "audio_data": "base64...", "text": "The weather is..."}` |
+| `error` | Something failed | `{"type": "error", "message": "STT failed"}` |
+
+### The Message Loop (Server Side)
+
+```python
+# Simplified version of api/websocket.py
+async def websocket_handler(websocket, token):
+    # 1. Validate JWT
+    claims = verify_jwt(token)
+    device_id = claims["device_id"]
+    
+    # 2. Accept connection
+    await websocket.accept()
+    
+    # 3. Wait for connect message (10s timeout)
+    connect_msg = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+    capabilities = connect_msg.get("capabilities", [])
+    
+    # 4. Register device
+    await device_registry.register(device_id, {"node_id": my_node_id, ...})
+    
+    # 5. Message loop
+    heartbeat_missed = 0
+    while True:
+        try:
+            msg = await asyncio.wait_for(
+                websocket.receive_json(),
+                timeout=heartbeat_interval + 5
+            )
+            heartbeat_missed = 0  # Reset on any message
+            
+            if msg["type"] == "heartbeat":
+                await websocket.send_json({"type": "heartbeat_ack"})
+            
+            elif msg["type"] == "audio":
+                await handle_audio(device_id, msg)
+            
+            elif msg["type"] == "tool_response":
+                await tool_bridge.handle_response(msg["correlation_id"], msg["result"])
+            
+            elif msg["type"] == "disconnect":
+                break
+        
+        except asyncio.TimeoutError:
+            heartbeat_missed += 1
+            if heartbeat_missed >= 3:
+                await websocket.close(code=4004, reason="Heartbeat timeout")
+                break
+            # Send probe heartbeat
+            await websocket.send_json({"type": "heartbeat"})
+    
+    # 6. Cleanup
+    await device_registry.set_status(device_id, "offline")
+```
+
+### WebSocket Close Codes
+
+| Code | Meaning | When We Use It |
+|------|---------|---------------|
+| 1000 | Normal close | Graceful disconnect |
+| 1001 | Going away | Server shutting down |
+| 4001 | Missing token | No JWT in query param |
+| 4002 | Invalid token | JWT verification failed |
+| 4003 | Missing device_id | JWT doesn't have device_id |
+| 4004 | Heartbeat timeout | Missed 3 heartbeats |
+
+---
+
+## 21. The Full Data Flow — A Complete Trace
 
 Let's trace a single voice request from beginning to end. Phone A says "What's the weather in Cairo?" connected to Node-1.
 
@@ -1234,41 +1700,76 @@ config.yaml                     All configuration
 
 ### Q1: What if node-1 crashes mid-pipeline (STT? LLM? TTS? Tool call?)
 
-**Short answer**: The current architecture loses in-flight work (that audio turn). The session survives in Redis, but the user needs to re-speak. See the checkpoint fix below for a production solution.
+**Short answer**: The checkpoint pipeline SAVES the work. Each stage writes to a Redis stream. If a node crashes, another node picks up the job from the stream. The user's turn is NOT lost (except in rare edge cases).
 
-**Detailed table — what's lost at each stage:**
+**This is IMPLEMENTED, not planned.**
 
-| Crash during | What's lost | Is session recoverable? |
+### Detailed table — what happens at each stage:
+
+| Crash during | What's in Redis | Recovery |
 |---|---|---|
-| Receiving audio via WebSocket | Audio in that chunk. Phone reconnects to node-2. | Phone re-sends audio. Session intact. |
-| STT (Whisper transcribing) | Temp WAV file on node-1's disk. | No — audio was in node-1 RAM. Phone re-sends. |
-| STT done, LLM starting | Transcription wasn't saved to Redis yet. | Phone has the interim transcript (was sent back), but pipeline has no checkpoint. |
-| LLM awaiting Groq API response | `asyncio.Future` is in node-1's RAM. Lost. | No — Groq won't retry. Phone re-sends. |
-| LLM done, awaiting tool response from phone | Tool request was sent to phone. If node-1 dies, phone's WS response goes nowhere. `tool_corr:{id}` still in Redis but nobody's listening. | No — the future was on node-1. Phone might have result but nobody picks it up. |
-| TTS synthesizing | Temp WAV on node-1's disk. Lost. | No. Phone re-sends. |
-| TTS done, sending to phone | Phone might get partial audio then WS drops. | Partial — phone plays what it got. Next turn continues fresh on node-2. |
+| Receiving audio via WebSocket | Audio already `XADD`'d to `stt_jobs` stream | Any node's STT worker picks it up |
+| STT (Whisper transcribing) | Job is "pending" in `stt_jobs` consumer group | After visibility timeout, another node's STT worker claims it |
+| STT done, result in `llm_jobs` | Transcript safely in `llm_jobs` stream | Any node's LLM worker picks it up |
+| LLM awaiting Groq API response | Job is "pending" in `llm_jobs` | Consumer group will retry (exponential backoff) |
+| LLM done, awaiting tool response from phone | `tool_corr:{id}` in Redis with TTL 35s, response goes to `tool_resp:{id}` | Any node waiting on `BLPOP tool_resp:{id}` gets it |
+| TTS synthesizing | Response text in `tts_jobs` stream | Any node's TTS worker picks it up |
+| TTS done, audio in `responses` | Audio in `responses` stream | WS Sender on any node picks it up |
+| Sending to phone | Audio in `responses` + phone is on a specific node | If that node died, phone reconnects to another node, but this audio is "orphaned" |
 
-**The checkpoint fix (planned):**
+### The Only Edge Case: Orphaned Responses
 
-The solution is to break the pipeline into stages with Redis Streams between them:
+If TTS finishes and puts audio in `responses`, but the target node died:
+- The audio sits in the stream
+- WS Sender on the dead node can't deliver it
+- WS Sender on other nodes check: "Is this phone connected to ME?" → No → Skip
+- Phone reconnects to a new node and sends new audio
+
+**Mitigation (future)**: Could store undelivered responses and replay on reconnect. For now, user just asks again.
+
+### How Consumer Groups Enable Recovery
 
 ```
-WS Receive → [stt_jobs stream] → STT (any node) → [llm_jobs stream] → LLM (any node)
-    → [tool_jobs stream] → Tool (any node) → [tts_jobs stream] → TTS (any node)
-    → [responses stream] → WS Send (original node)
+Timeline:
+────────────────────────────────────────────────────────────────►
+
+Node-1: XREADGROUP stt_jobs → gets job ID 123
+        Processing... 
+        [CRASH]
+
+Job 123 is now "pending" in stt_jobs, owned by consumer "worker:node-1:stt-0"
+
+After ~5 seconds (visibility timeout):
+Node-2: XREADGROUP stt_jobs → sees pending job 123
+        Claims it: "I'll take over this job"
+        Processes it successfully
+        XACK stt_jobs 123  → job marked as done
 ```
 
-Each stage writes its output to a Redis Stream *before* the next stage picks it up. If a node crashes mid-stage, another node picks up the job from the stream. The `tool_corr:{id}` would be replaced by a stream consumer group with retry logic.
+Redis tracks:
+- Which consumer is processing which job
+- How long it's been pending
+- How many times it's been delivered
 
-| Crash during | After fix |
-|---|---|
-| Receiving audio | Audio in Redis stream. Any node picks it up. |
-| STT | Job in `stt_jobs`. Another node resumes. |
-| STT→LLM | Transcript in `llm_jobs`. Any node runs LLM. |
-| LLM awaiting Groq | Consumer group retries the LLM job. |
-| Tool awaiting phone | Tool response goes to `tool_responses` stream instead of a future. Any node reads it. |
-| TTS | Response text in `tts_jobs`. Any node synthesizes. |
-| Sending to phone | TTS audio in `responses` stream. Phone fetches on reconnect. |
+If delivery count exceeds `max_retries` (default 3), we acknowledge and discard it (give up).
+
+### The `device_ws:{device_id}` Key
+
+We also track which node a phone is connected to:
+
+```
+device_ws:phone-android-123 = "node-1"  (TTL: 35 seconds)
+```
+
+This TTL auto-expires if the node dies. The phone's heartbeat refreshes it every 30 seconds.
+
+**If node-1 crashes:**
+1. `device_ws:phone-123` TTL expires after 35s
+2. Phone's WebSocket disconnects
+3. Phone reconnects → load balancer sends to node-2
+4. Node-2 sees: no `device_ws:phone-123` key → phone is "new" here
+5. Phone's session data is still in Redis (`session:phone-123`, `conv:phone-123`)
+6. Node-2 continues seamlessly
 
 ---
 

@@ -29,9 +29,12 @@ async def tts_handler(data: dict) -> dict:
     language = data.get("language")
 
     if not response_text:
-        return {"device_id": device_id, "session_id": session_id, "audio": ""}
+        logger.warning(f"TTS [{device_id}]: empty response text, skipping synthesis")
+        return {"device_id": device_id, "session_id": session_id, "audio": "", "text": ""}
 
+    logger.info(f"TTS [{device_id}]: synthesizing {len(response_text)} chars for language={language}")
     audio_b64 = await tts.synthesize_and_b64(response_text, language=language)
+    logger.info(f"TTS [{device_id}]: synthesized {len(audio_b64)} bytes of audio")
 
     return {
         "device_id": device_id,
@@ -53,5 +56,6 @@ async def process_tts_jobs(redis: RedisManager, consumer: str):
         handler=tts_handler,
         poll_timeout=settings.pipeline.poll_timeout_ms,
         max_retries=settings.pipeline.tts_max_retries,
+        target_stream=settings.pipeline.response_stream,
     )
     await worker.start()

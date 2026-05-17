@@ -13,20 +13,26 @@ class RedisManager:
     _instance: Optional["RedisManager"] = None
     _pool: Optional[ConnectionPool] = None
     _client: Optional[Redis] = None
-    _lock: asyncio.Lock = None
+    _lock: Optional[asyncio.Lock] = None
+    _initialized: bool = False
 
     def __init__(self):
-        self._lock = asyncio.Lock()
         self._settings = get_settings()
 
     @classmethod
+    def _get_lock(cls) -> asyncio.Lock:
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        return cls._lock
+
+    @classmethod
     async def get_instance(cls) -> "RedisManager":
-        if cls._instance is None:
-            async with asyncio.Lock():
+        if cls._instance is None or not cls._initialized:
+            async with cls._get_lock():
                 if cls._instance is None:
-                    inst = cls()
-                    await inst._initialize()
-                    cls._instance = inst
+                    cls._instance = cls()
+                if not cls._initialized:
+                    await cls._instance._initialize()
         return cls._instance
 
     async def _initialize(self):
@@ -49,6 +55,7 @@ class RedisManager:
             self._pool = ConnectionPool(**pool_kwargs)
 
         self._client = Redis(connection_pool=self._pool)
+        self._initialized = True
 
     @property
     def client(self) -> Redis:
@@ -87,14 +94,17 @@ class RedisManager:
             return {}
         out = {}
         for k, v in raw.items():
+            k_str = k.decode() if isinstance(k, bytes) else k
+            if isinstance(v, bytes):
+                v_str = v.decode()
+            elif isinstance(v, str):
+                v_str = v
+            else:
+                v_str = str(v)
             try:
-                out[k.decode() if isinstance(k, bytes) else k] = json.loads(
-                    v.decode() if isinstance(v, bytes) else v
-                )
+                out[k_str] = json.loads(v_str)
             except (json.JSONDecodeError, UnicodeDecodeError):
-                out[k.decode() if isinstance(k, bytes) else k] = (
-                    v.decode() if isinstance(v, bytes) else v
-                )
+                out[k_str] = v_str
         return out
 
     async def set_with_ttl(self, key: str, value: Any, ttl: int) -> None:
@@ -103,12 +113,18 @@ class RedisManager:
 
     async def get(self, key: str) -> Any:
         raw = await self._client.get(key)
-        if not raw:
+        if isinstance(raw, bytes):
+            raw_str = raw.decode()
+        elif isinstance(raw, str):
+            raw_str = raw
+        elif raw is None:
             return None
+        else:
+            raw_str = str(raw)
         try:
-            return json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+            return json.loads(raw_str)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return raw.decode() if isinstance(raw, bytes) else raw
+            return raw_str
 
     async def delete(self, key: str) -> None:
         await self._client.delete(key)
@@ -128,10 +144,11 @@ class RedisManager:
         raw = await self._client.lrange(key, start, end)
         out = []
         for item in raw:
+            item_str = item.decode() if isinstance(item, bytes) else (item if isinstance(item, str) else str(item))
             try:
-                out.append(json.loads(item.decode() if isinstance(item, bytes) else item))
+                out.append(json.loads(item_str))
             except (json.JSONDecodeError, UnicodeDecodeError):
-                out.append(item.decode() if isinstance(item, bytes) else item)
+                out.append(item_str)
         return out
 
     async def ltrim(self, key: str, start: int, end: int) -> None:
@@ -142,9 +159,16 @@ class RedisManager:
 
     async def zrange(self, key: str, start: int = 0, end: int = -1, withscores: bool = False) -> list[Any]:
         raw = await self._client.zrange(key, start, end, withscores=withscores)
+        def _decode(x):
+            if isinstance(x, bytes):
+                try:
+                    return json.loads(x.decode())
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    return x.decode()
+            return x
         if not withscores:
-            return [json.loads(x) if isinstance(x, bytes) else x for x in raw]
-        return [(json.loads(k) if isinstance(k, bytes) else k, s) for k, s in raw]
+            return [_decode(x) for x in raw]
+        return [(_decode(k), s) for k, s in raw]
 
     async def publish(self, channel: str, message: Any) -> int:
         encoded = json.dumps(message) if not isinstance(message, str) else message
@@ -154,14 +178,22 @@ class RedisManager:
         result = await self._client.blpop(key, timeout=timeout)
         if result:
             _, raw = result
+            raw_str = raw.decode() if isinstance(raw, bytes) else (raw if isinstance(raw, str) else str(raw))
             try:
-                return result[0], json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+                return result[0], json.loads(raw_str)
             except (json.JSONDecodeError, UnicodeDecodeError):
-                return result[0], raw.decode() if isinstance(raw, bytes) else raw
+                return result[0], raw_str
         return None, None
 
     async def xadd(self, stream: str, fields: dict[str, Any], maxlen: int = 1000) -> str:
-        flat = {k: json.dumps(v) if not isinstance(v, str) else v for k, v in fields.items()}
+        flat: dict[str, str] = {}
+        for k, v in fields.items():
+            if isinstance(v, str):
+                flat[k] = v
+            elif isinstance(v, bytes):
+                flat[k] = v.decode()
+            else:
+                flat[k] = json.dumps(v, ensure_ascii=False)
         return await self._client.xadd(stream, flat, maxlen=maxlen)
 
     async def xread(self, streams: dict[str, str], count: int = 10, block: int = None) -> list[Any]:
@@ -171,13 +203,22 @@ class RedisManager:
             for msg_id, data in messages:
                 decoded = {}
                 for k, v in data.items():
+                    k_str = k.decode() if isinstance(k, bytes) else k
+                    if isinstance(v, bytes):
+                        v_str = v.decode()
+                    elif isinstance(v, str):
+                        v_str = v
+                    else:
+                        v_str = str(v)
                     try:
-                        decoded[k.decode() if isinstance(k, bytes) else k] = json.loads(
-                            v.decode() if isinstance(v, bytes) else v
-                        )
+                        decoded[k_str] = json.loads(v_str)
                     except (json.JSONDecodeError, UnicodeDecodeError):
-                        decoded[k.decode() if isinstance(k, bytes) else k] = v.decode() if isinstance(v, bytes) else v
-                results.append({"stream": stream_name, "id": msg_id.decode() if isinstance(msg_id, bytes) else msg_id, "data": decoded})
+                        decoded[k_str] = v_str
+                results.append({
+                    "stream": stream_name.decode() if isinstance(stream_name, bytes) else stream_name,
+                    "id": msg_id.decode() if isinstance(msg_id, bytes) else msg_id,
+                    "data": decoded,
+                })
         return results
 
     async def expire(self, key: str, ttl: int) -> None:
@@ -210,16 +251,19 @@ class RedisManager:
             for msg_id, data in messages:
                 decoded = {}
                 for k, v in data.items():
+                    k_str = k.decode() if isinstance(k, bytes) else k
+                    if isinstance(v, bytes):
+                        v_str = v.decode()
+                    elif isinstance(v, str):
+                        v_str = v
+                    else:
+                        v_str = str(v)
                     try:
-                        decoded[k.decode() if isinstance(k, bytes) else k] = json.loads(
-                            v.decode() if isinstance(v, bytes) else v
-                        )
+                        decoded[k_str] = json.loads(v_str)
                     except (json.JSONDecodeError, UnicodeDecodeError):
-                        decoded[k.decode() if isinstance(k, bytes) else k] = (
-                            v.decode() if isinstance(v, bytes) else v
-                        )
+                        decoded[k_str] = v_str
                 results.append({
-                    "stream": stream_name,
+                    "stream": stream_name.decode() if isinstance(stream_name, bytes) else stream_name,
                     "id": msg_id.decode() if isinstance(msg_id, bytes) else msg_id,
                     "data": decoded,
                 })
@@ -253,10 +297,12 @@ class RedisManager:
         return None
 
     async def close(self):
-        if self._client:
-            await self._client.aclose()
-        if self._pool:
-            await self._pool.disconnect()
+        try:
+            if self._client:
+                await self._client.aclose()
+        finally:
+            if self._pool:
+                await self._pool.disconnect()
 
 
 async def get_redis() -> RedisManager:

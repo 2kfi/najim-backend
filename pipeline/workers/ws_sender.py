@@ -8,6 +8,8 @@ from api.websocket import get_active_connection
 
 logger = logging.getLogger(__name__)
 
+WS_SEND_TIMEOUT = 30.0
+
 
 async def response_handler(data: dict) -> None:
     device_id = data.get("device_id", "")
@@ -20,8 +22,10 @@ async def response_handler(data: dict) -> None:
     text = data.get("text", "")
     msg = {"type": "audio_chunk", "audio_data": audio, "text": text}
     try:
-        await ws.send_json(msg)
+        await asyncio.wait_for(ws.send_json(msg), timeout=WS_SEND_TIMEOUT)
         logger.info(f"Sent response to {device_id}")
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout sending to {device_id}")
     except Exception as e:
         logger.error(f"Failed to send to {device_id}: {e}")
 

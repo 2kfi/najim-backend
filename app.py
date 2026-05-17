@@ -13,9 +13,10 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketState
-from slowapi import Limiter
+from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from core.config import get_settings, Settings
 from core.redis_manager import RedisManager, get_redis
@@ -27,6 +28,12 @@ from api.health import router as health_router
 from pipeline.orchestrator import WorkerManager
 
 logger = logging.getLogger("najim")
+
+settings = get_settings()
+logging.basicConfig(
+    level=logging.DEBUG if settings.debug else logging.INFO,
+    format="%(levelname)s: %(name)s: %(message)s",
+)
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -61,8 +68,6 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
-settings = get_settings()
-
 app = FastAPI(
     title="Najim Backend",
     version="3.0.0",
@@ -70,11 +75,12 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.cors_origins,
+    allow_credentials=False if "*" in settings.cors_origins else True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -146,11 +152,20 @@ async def root():
     }
 
 
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=404,
+        content={"error": "Not found", "error_code": "NOT_FOUND", "path": request.url.path}
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         app,
         host=settings.api_host,
         port=settings.api_port,
-        log_level="info",
+        log_level="debug" if settings.debug else "info",
+        ws_ping_interval=None,
     )

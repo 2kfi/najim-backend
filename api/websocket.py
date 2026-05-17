@@ -22,12 +22,19 @@ router = APIRouter(prefix="/api/v1", tags=["websocket"])
 
 _active_connections: dict[str, WebSocket] = {}
 _connection_locks: dict[str, asyncio.Lock] = {}
+_locks_lock: asyncio.Lock = asyncio.Lock()
 
 
-def _get_lock(device_id: str) -> asyncio.Lock:
-    if device_id not in _connection_locks:
-        _connection_locks[device_id] = asyncio.Lock()
-    return _connection_locks[device_id]
+async def _get_lock(device_id: str) -> asyncio.Lock:
+    async with _locks_lock:
+        if device_id not in _connection_locks:
+            _connection_locks[device_id] = asyncio.Lock()
+        return _connection_locks[device_id]
+
+
+async def _cleanup_lock(device_id: str) -> None:
+    async with _locks_lock:
+        _connection_locks.pop(device_id, None)
 
 
 async def _start_ws_listener(node_id: str, redis: RedisManager) -> None:
@@ -44,7 +51,9 @@ async def _start_ws_listener(node_id: str, redis: RedisManager) -> None:
                         ws = _active_connections[device_id]
                         if ws.client_state == WebSocketState.CONNECTED:
                             await ws.send_json(data)
-                except (json.JSONDecodeError, Exception) as e:
+                except json.JSONDecodeError as e:
+                    logger.error(f"WS send error: invalid JSON: {e}")
+                except Exception as e:
                     logger.error(f"WS send error: {e}")
     finally:
         await pubsub.unsubscribe(channel)
@@ -94,6 +103,7 @@ async def ws_connect(websocket: WebSocket, token: Optional[str] = Query(None)):
         if caps_raw.get("type") == "connect":
             capabilities = caps_raw.get("capabilities", [])
             remote_tools = caps_raw.get("tools", [])
+            logger.info(f"Device {device_id} connected with capabilities: {capabilities}, tools: {len(remote_tools)}")
     except asyncio.TimeoutError:
         logger.warning(f"Device {device_id} did not send connect message within 10s")
     except Exception as e:
@@ -108,9 +118,14 @@ async def ws_connect(websocket: WebSocket, token: Optional[str] = Query(None)):
     )
     await device_registry.register(device_id, device_info)
 
-    await _register_phone_tools(device_id, capabilities, remote_tools)
+    all_tools = []
+    for cap in capabilities:
+        all_tools.append({"name": cap, "description": f"Remote tool: {cap}", "input_schema": {"type": "object", "properties": {}, "required": []}})
+    all_tools.extend(remote_tools)
+    
+    await _register_phone_tools(device_id, capabilities, all_tools)
 
-    async with _get_lock(device_id):
+    async with await _get_lock(device_id):
         _active_connections[device_id] = websocket
 
     await websocket.send_json({
@@ -120,13 +135,21 @@ async def ws_connect(websocket: WebSocket, token: Optional[str] = Query(None)):
     })
 
     try:
+        heartbeat_missed = 0
+        max_heartbeat_misses = 3
         while True:
             try:
                 data = await asyncio.wait_for(
                     websocket.receive_json(),
                     timeout=settings.session.heartbeat_interval + 5,
                 )
+                heartbeat_missed = 0
             except asyncio.TimeoutError:
+                heartbeat_missed += 1
+                if heartbeat_missed >= max_heartbeat_misses:
+                    logger.warning(f"Device {device_id} missed {max_heartbeat_misses} heartbeats, disconnecting")
+                    await websocket.close(code=4004, reason="Heartbeat timeout")
+                    break
                 await websocket.send_json({"type": "heartbeat", "timestamp": time.time()})
                 await device_registry.heartbeat(device_id)
                 continue
@@ -161,21 +184,41 @@ async def ws_connect(websocket: WebSocket, token: Optional[str] = Query(None)):
     except WebSocketDisconnect:
         logger.info(f"Device {device_id} disconnected")
     except Exception as e:
-        logger.error(f"WS error for device {device_id}: {e}")
+        logger.error(f"WS error for device {device_id}: {e}", exc_info=True)
     finally:
-        async with _get_lock(device_id):
+        async with await _get_lock(device_id):
             _active_connections.pop(device_id, None)
+        await _cleanup_lock(device_id)
+        try:
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.close(code=1000, reason="Connection closed")
+        except Exception:
+            pass
         await device_registry.set_status(device_id, DeviceStatus.OFFLINE)
         await device_registry.unregister(device_id)
 
 
 async def _handle_audio(websocket: WebSocket, device_id: str, data: dict, redis: RedisManager) -> None:
-    audio_b64 = data.get("audio_data", "")
+    audio_b64 = data.get("audio_data") or data.get("data", "")
     if not audio_b64:
         await websocket.send_json({"type": "error", "message": "Missing audio_data"})
         return
 
     settings = get_settings()
+    
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+        audio_size_mb = len(audio_bytes) / (1024 * 1024)
+        if audio_size_mb > settings.max_audio_size_mb:
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Audio too large: {audio_size_mb:.2f}MB (max: {settings.max_audio_size_mb}MB)"
+            })
+            return
+    except Exception as e:
+        await websocket.send_json({"type": "error", "message": f"Invalid audio data: {e}"})
+        return
+
     stream_key = settings.pipeline.stt_stream
 
     await redis.xadd(stream_key, {

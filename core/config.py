@@ -1,17 +1,18 @@
 import os
 from functools import lru_cache
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
+from typing import Any, Optional
 
 
 class RedisSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="REDIS_")
 
-    url: str = ""
+    url: Optional[str] = None
     host: str = "localhost"
     port: int = 6379
     password: str = ""
-    tls: bool = True
+    tls: bool = False
     pool_size: int = 20
     socket_keepalive: bool = True
     socket_connect_timeout: int = 5
@@ -55,7 +56,7 @@ class TTSSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TTS_")
 
     model_dir: str = "./models"
-    voices: dict[str, dict[str, str]] = {
+    voices: dict[str, dict[str, Any]] = {
         "en": {"local_path": "TTS-CORI-EN", "voice": "en.en_GB.cori.high"},
         "ar": {"local_path": "TTS-KAREEM-ARABIC", "voice": "ar.ar_JO.kareem.medium"},
     }
@@ -129,17 +130,67 @@ class PipelineSettings(BaseSettings):
     llm_max_retries: int = 2
     tts_max_retries: int = 3
     poll_timeout_ms: int = 5000
+    stt_workers: int = 1
+    llm_workers: int = 1
+    tts_workers: int = 1
+    ws_workers: int = 1
 
 
 class AuthSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AUTH_")
 
-    api_keys: dict[str, dict[str, str]] = {}
+    api_keys: dict[str, dict[str, Any]] = {}
     jwt_only: bool = True
 
 
+class _NestedEnvSource:
+    def __init__(self, settings_cls):
+        pass
+
+    def __call__(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        nested_prefixes = {
+            "pipeline": "PIPELINE_",
+            "redis": "REDIS_",
+            "jwt": "JWT_",
+            "llm": "LLM_",
+            "mcp": "MCP_",
+            "stt": "STT_",
+            "tts": "TTS_",
+            "session": "SESSION_",
+            "tool": "TOOL_",
+            "cluster": "CLUSTER_",
+            "auth": "AUTH_",
+        }
+        for field_name, prefix in nested_prefixes.items():
+            sub: dict[str, Any] = result.setdefault(field_name, {})
+            for env_key, env_val in os.environ.items():
+                if env_key.startswith(prefix):
+                    sub_key = env_key[len(prefix):].lower()
+                    sub[sub_key] = env_val
+        return result
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file="config.yaml", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(extra="ignore")
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        return (
+            init_settings,
+            _NestedEnvSource(settings_cls),
+            env_settings,
+            dotenv_settings,
+            YamlConfigSettingsSource(settings_cls, yaml_file="config.yaml"),
+            file_secret_settings,
+        )
 
     api_host: str = "0.0.0.0"
     api_port: int = 8080
@@ -149,17 +200,17 @@ class Settings(BaseSettings):
     max_audio_size_mb: int = 10
     allowed_audio_types: list[str] = ["audio/wav", "audio/mpeg", "audio/ogg"]
 
-    redis: RedisSettings = RedisSettings()
-    jwt: JWTSettings = JWTSettings()
-    llm: LLMSettings = LLMSettings()
-    mcp: MCPSettings = MCPSettings()
-    stt: STTSettings = STTSettings()
-    tts: TTSSettings = TTSSettings()
-    session: SessionSettings = SessionSettings()
-    tool: ToolSettings = ToolSettings()
-    cluster: ClusterSettings = ClusterSettings()
-    auth: AuthSettings = AuthSettings()
-    pipeline: PipelineSettings = PipelineSettings()
+    redis: RedisSettings = Field(default_factory=RedisSettings)
+    jwt: JWTSettings = Field(default_factory=JWTSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
+    mcp: MCPSettings = Field(default_factory=MCPSettings)
+    stt: STTSettings = Field(default_factory=STTSettings)
+    tts: TTSSettings = Field(default_factory=TTSSettings)
+    session: SessionSettings = Field(default_factory=SessionSettings)
+    tool: ToolSettings = Field(default_factory=ToolSettings)
+    cluster: ClusterSettings = Field(default_factory=ClusterSettings)
+    auth: AuthSettings = Field(default_factory=AuthSettings)
+    pipeline: PipelineSettings = Field(default_factory=PipelineSettings)
 
 
 @lru_cache

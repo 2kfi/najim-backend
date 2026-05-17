@@ -84,10 +84,13 @@ class ToolRegistry:
 
 
 _registry: Optional[ToolRegistry] = None
+_registry_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def get_tool_registry() -> ToolRegistry:
     global _registry
     if _registry is None:
-        _registry = ToolRegistry()
+        async with _registry_lock:
+            if _registry is None:
+                _registry = ToolRegistry()
     return _registry

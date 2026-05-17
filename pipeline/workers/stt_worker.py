@@ -64,5 +64,6 @@ async def process_stt_jobs(redis: RedisManager, consumer: str):
         handler=stt_handler,
         poll_timeout=settings.pipeline.poll_timeout_ms,
         max_retries=settings.pipeline.stt_max_retries,
+        target_stream=settings.pipeline.llm_stream,
     )
     await worker.start()
